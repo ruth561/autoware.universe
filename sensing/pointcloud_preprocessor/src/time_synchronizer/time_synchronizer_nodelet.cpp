@@ -43,6 +43,7 @@ PointCloudDataSynchronizerComponent::PointCloudDataSynchronizerComponent(
   const rclcpp::NodeOptions & node_options)
 : Node("point_cloud_time_synchronizer_component", node_options)
 {
+  std::cerr << "🍀 < PointCloudDataSynchronizerComponent" << std::endl;
   // initialize debug tool
   {
     using tier4_autoware_utils::DebugPublisher;
@@ -169,12 +170,15 @@ void PointCloudDataSynchronizerComponent::transformPointCloud(
   transformPointCloud(in, out, output_frame_);
 }
 
+// 入力データを TF2 へ変換する関数（らしい）
+// ここではほとんど時間がかからない、とあるが、それは本当か？（検証あるのみ）
 void PointCloudDataSynchronizerComponent::transformPointCloud(
   const PointCloud2::ConstSharedPtr & in, PointCloud2::SharedPtr & out,
   const std::string & target_frame)
 {
   // Transform the point clouds into the specified output frame
   if (target_frame != in->header.frame_id) {
+    std::cerr << "🧱 [ transformPointCloud ] target_frame != in->header.frame_id" << std::endl;
     // TODO(YamatoAndo): use TF2
     if (!pcl_ros::transformPointCloud(target_frame, *in, *out, *tf2_buffer_)) {
       RCLCPP_ERROR(
@@ -184,10 +188,13 @@ void PointCloudDataSynchronizerComponent::transformPointCloud(
       return;
     }
   } else {
+    std::cerr << "🧱 [ transformPointCloud ] make_shared が呼ばれそう" << std::endl;
     out = std::make_shared<PointCloud2>(*in);
   }
 }
 
+// 新しい時刻のデータを古い時刻のデータへ変換するための行列を作成する関数。
+// velocity_report なんかを使ってデータの整形を行っている。
 /**
  * @brief compute transform to adjust for old timestamp
  *
@@ -251,12 +258,18 @@ Eigen::Matrix4f PointCloudDataSynchronizerComponent::computeTransformToAdjustFor
   return rotation_matrix;
 }
 
+// cloud_stdmap_ に入っている現在の点群データたちを最も古いタイムスタンプに合わせて変形し、
+// 変形後のデータを map として返す関数。
+// データの時刻を揃える関数。
+// パブリッシュする直前に呼ばれる。
 std::map<std::string, sensor_msgs::msg::PointCloud2::SharedPtr>
 PointCloudDataSynchronizerComponent::synchronizeClouds()
 {
   // map for storing the transformed point clouds
   std::map<std::string, sensor_msgs::msg::PointCloud2::SharedPtr> transformed_clouds;
 
+  // cloud_stdmap_ に同期したい点群データが入っている
+  // まず、その中から時刻（タイムスタンプ）を取り出し、ソートする。
   // Step1. gather stamps and sort it
   std::vector<rclcpp::Time> pc_stamps;
   for (const auto & e : cloud_stdmap_) {
@@ -271,15 +284,19 @@ PointCloudDataSynchronizerComponent::synchronizeClouds()
   // sort stamps and get oldest stamp
   std::sort(pc_stamps.begin(), pc_stamps.end());
   std::reverse(pc_stamps.begin(), pc_stamps.end());
+  // 点群データのタイムスタンプの中で最も古い時刻のものを見つけ、oldest_stamp とする。
   const auto oldest_stamp = pc_stamps.back();
 
   // Step2. Calculate compensation transform and concatenate with the oldest stamp
   for (const auto & e : cloud_stdmap_) {
     if (e.second != nullptr) {
+      // 元の点群データ e から変形後のデータ transformed_cloud_ptr を作成する。
+      // ここでやってる変形って何？TF2 への変換？
       sensor_msgs::msg::PointCloud2::SharedPtr transformed_cloud_ptr(
         new sensor_msgs::msg::PointCloud2());
       transformPointCloud(e.second, transformed_cloud_ptr);
 
+      // 新しい時刻から古い時刻への変換行列を作成する
       // calculate transforms to oldest stamp
       Eigen::Matrix4f adjust_to_old_data_transform = Eigen::Matrix4f::Identity();
       rclcpp::Time transformed_stamp = rclcpp::Time(e.second->header.stamp);
@@ -289,6 +306,7 @@ PointCloudDataSynchronizerComponent::synchronizeClouds()
         adjust_to_old_data_transform = new_to_old_transform * adjust_to_old_data_transform;
         transformed_stamp = std::min(transformed_stamp, stamp);
       }
+      // 作成した変換行列をもとに、pcl_ros::transformPointCloud 関数で点群データの変換を行う。
       sensor_msgs::msg::PointCloud2::SharedPtr transformed_delay_compensated_cloud_ptr(
         new sensor_msgs::msg::PointCloud2());
       pcl_ros::transformPointCloud(
@@ -297,6 +315,7 @@ PointCloudDataSynchronizerComponent::synchronizeClouds()
       // gather transformed clouds
       transformed_delay_compensated_cloud_ptr->header.stamp = oldest_stamp;
       transformed_delay_compensated_cloud_ptr->header.frame_id = output_frame_;
+      // 変換後の点群データを戻り値ようの map に設定する。
       transformed_clouds[e.first] = transformed_delay_compensated_cloud_ptr;
     } else {
       not_subscribed_topic_names_.insert(e.first);
@@ -305,6 +324,8 @@ PointCloudDataSynchronizerComponent::synchronizeClouds()
   return transformed_clouds;
 }
 
+// 溜まった点群データをパブリッシュする関数
+// @@@publish
 void PointCloudDataSynchronizerComponent::publish()
 {
   stop_watch_ptr_->toc("processing_time", true);
@@ -312,6 +333,7 @@ void PointCloudDataSynchronizerComponent::publish()
 
   const auto & transformed_raw_points = PointCloudDataSynchronizerComponent::synchronizeClouds();
 
+  // 変形後の点群データたちを（*_synchronized というトピックに）パブリッシュする
   // publish transformed raw pointclouds
   for (const auto & e : transformed_raw_points) {
     if (e.second) {
@@ -396,12 +418,19 @@ void PointCloudDataSynchronizerComponent::setPeriod(const int64_t new_period)
   }
 }
 
+// @@@cloud_callback
+// 各トピック（top, left, right）からサブスクライブしたときに呼ばれるコールバック関数
 void PointCloudDataSynchronizerComponent::cloud_callback(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr & input_ptr, const std::string & topic_name)
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  // ここの make_shared いらない
   auto input = std::make_shared<sensor_msgs::msg::PointCloud2>(*input_ptr);
   sensor_msgs::msg::PointCloud2::SharedPtr xyzi_input_ptr(new sensor_msgs::msg::PointCloud2());
+  // サブスクライブした点群データを XYZI 形式に変換
+  // （現在は XYZI 形式のデータが流れてくるため、変換する必要がないが、
+  // 　いずれ XYZIRC 形式のデータが流れてくることになるらしい。）
+  // （単純に ConstSharedPtr から SharedPtr へ変換していると考えれば良さそう。）
   convertToXYZICloud(input, xyzi_input_ptr);
 
   const bool is_already_subscribed_this = (cloud_stdmap_[topic_name] != nullptr);
@@ -410,9 +439,13 @@ void PointCloudDataSynchronizerComponent::cloud_callback(
     [](const auto & e) { return e.second != nullptr; });
 
   if (is_already_subscribed_this) {
+    // もし他のデータが全て揃う前に2度目のデータをサブスクライブしたら
+    // tmp のほうにデータを格納しておく。
     cloud_stdmap_tmp_[topic_name] = xyzi_input_ptr;
 
     if (!is_already_subscribed_tmp) {
+      // すでに他のトピックから2度のデータが流れてきているようなら
+      // タイマーをセットし、時間制限を設ける。
       auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(timeout_sec_));
       try {
@@ -423,6 +456,8 @@ void PointCloudDataSynchronizerComponent::cloud_callback(
       timer_->reset();
     }
   } else {
+    // 以前パブリッシュしてから最初のサブスクライブの場合、
+    // 通常の stdmap にデータを格納しておく。
     cloud_stdmap_[topic_name] = xyzi_input_ptr;
 
     const bool is_subscribed_all = std::all_of(
@@ -430,6 +465,8 @@ void PointCloudDataSynchronizerComponent::cloud_callback(
       [](const auto & e) { return e.second != nullptr; });
 
     if (is_subscribed_all) {
+      // 各トピックからの点群データが揃っていればパブリッシュする。
+      // その際、各店群データは最新のものを使用したいため、stdmap_tmp から stdmap へデータを移す
       for (const auto & e : cloud_stdmap_tmp_) {
         if (e.second != nullptr) {
           cloud_stdmap_[e.first] = e.second;
@@ -442,6 +479,7 @@ void PointCloudDataSynchronizerComponent::cloud_callback(
       timer_->cancel();
       publish();
     } else if (offset_map_.size() > 0) {
+      // まだ全ての点群データが揃っていない場合、
       timer_->cancel();
       auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(timeout_sec_ - offset_map_[topic_name]));
@@ -473,6 +511,8 @@ void PointCloudDataSynchronizerComponent::timer_callback()
   }
 }
 
+// /vehicle/statuc/velocity_status トピックからサブスクライブしたときに呼ばれるコールバック
+// @@@twist_callback
 void PointCloudDataSynchronizerComponent::twist_callback(
   const autoware_auto_vehicle_msgs::msg::VelocityReport::ConstSharedPtr input)
 {

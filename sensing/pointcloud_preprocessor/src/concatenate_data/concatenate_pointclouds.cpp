@@ -38,6 +38,7 @@ PointCloudConcatenationComponent::PointCloudConcatenationComponent(
   const rclcpp::NodeOptions & node_options)
 : Node("point_cloud_concatenator_component", node_options)
 {
+  std::cerr << "🙎 < PointCloudConcatenationComponent" << std::endl;
   // initialize debug tool
   {
     using tier4_autoware_utils::DebugPublisher;
@@ -283,6 +284,8 @@ void PointCloudConcatenationComponent::combineClouds(
 
 void PointCloudConcatenationComponent::publish()
 {
+  std::cerr << "👹";
+
   stop_watch_ptr_->toc("processing_time", true);
   sensor_msgs::msg::PointCloud2::SharedPtr concat_cloud_ptr = nullptr;
   not_subscribed_topic_names_.clear();
